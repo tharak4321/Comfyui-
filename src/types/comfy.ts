@@ -129,10 +129,11 @@ export interface VideoWorkflowParams {
   seed: number;
   randomizeSeed: boolean;
   durationSeconds: number;
-  resolution: string; // e.g. "720x1280 (9:16)", "1280x720 (16:9)"
+  resolution: string; // e.g. "9:16", "16:9", "1:1", or "720x1280 (9:16)"
+  megapixels?: number | string;
   fps: number;
   customWorkflowJson?: string;
-  nodeMapping: MiniMaxNodeMapping;
+  nodeMapping?: MiniMaxNodeMapping;
 }
 
 export interface AppSettings {

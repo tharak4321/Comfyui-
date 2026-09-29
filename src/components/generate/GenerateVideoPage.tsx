@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Video,
   Sparkles,
@@ -20,6 +20,12 @@ import {
   Maximize2,
   Edit3,
   Layers,
+  Upload,
+  FileText,
+  AlertTriangle,
+  Info,
+  CheckCircle,
+  XCircle,
 } from 'lucide-react';
 import { useComfy } from '../../context/ComfyContext';
 import { ImageUpload } from '../common/ImageUpload';
@@ -28,7 +34,6 @@ import {
   MiniMaxH3StructuredPrompt,
   TimedDialogueLine,
   VideoWorkflowParams,
-  MiniMaxNodeMapping,
 } from '../../types/comfy';
 import {
   DEFAULT_MINIMAX_PROMPT,
@@ -36,7 +41,7 @@ import {
   formatMiniMaxPrompt,
   parseRawMiniMaxPrompt,
 } from '../../utils/promptUtils';
-import { DEFAULT_MINIMAX_NODE_MAPPING } from '../../utils/workflowTemplates';
+import { validateMiniMaxH3Workflow } from '../../utils/minimaxWorkflow';
 
 interface GenerateVideoPageProps {
   setActiveTab: (tab: string) => void;
@@ -49,9 +54,12 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
     executionProgress,
     executingNodeId,
     submitVideoGeneration,
-    miniMaxMapping,
-    updateMiniMaxMapping,
     galleryItems,
+    miniMaxWorkflow,
+    miniMaxWorkflowRaw,
+    miniMaxWorkflowValidation,
+    importMiniMaxWorkflow,
+    clearMiniMaxWorkflow,
   } = useComfy();
 
   const [workflowType, setWorkflowType] = useState<'minimax-h3' | 'custom-video'>('minimax-h3');
@@ -72,21 +80,26 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
     return localStorage.getItem('comfy_minimax_raw') || formatMiniMaxPrompt(DEFAULT_MINIMAX_PROMPT);
   });
 
-  // Reference image (Picture 1)
+  // Reference image (Picture 1 -> Node 137 input 'image')
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [referenceBase64, setReferenceBase64] = useState<string | null>(null);
 
   // Video parameters
   const [durationSeconds, setDurationSeconds] = useState<number>(5);
-  const [resolution, setResolution] = useState<string>('720x1280 (9:16 Vertical)');
+  const [aspectRatio, setAspectRatio] = useState<string>('9:16');
+  const [megapixels, setMegapixels] = useState<number>(1.0);
   const [fps, setFps] = useState<number>(24);
   const [seed, setSeed] = useState<number>(4589210);
   const [randomizeSeed, setRandomizeSeed] = useState<boolean>(true);
 
-  // Custom workflow JSON
+  // Custom workflow JSON for custom-video mode
   const [customWorkflowJson, setCustomWorkflowJson] = useState<string>('');
-  const [showNodeMappingModal, setShowNodeMappingModal] = useState<boolean>(false);
-  const [nodeMapping, setNodeMapping] = useState<MiniMaxNodeMapping>(miniMaxMapping);
+
+  // Workflow Import & Inspector Modals
+  const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  const [showInspectModal, setShowInspectModal] = useState<boolean>(false);
+  const [importInputText, setImportInputText] = useState<string>('');
+  const [importFileError, setImportFileError] = useState<string | null>(null);
 
   // UI state
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
@@ -94,6 +107,22 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [showPromptPreview, setShowPromptPreview] = useState<boolean>(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync default megapixels and aspect ratio from node 115 if workflow is loaded
+  useEffect(() => {
+    if (miniMaxWorkflow && miniMaxWorkflow['115']?.inputs) {
+      const inputs = miniMaxWorkflow['115'].inputs;
+      if (inputs.aspect_ratio && typeof inputs.aspect_ratio === 'string') {
+        const match = inputs.aspect_ratio.match(/(\d+:\d+)/);
+        if (match) setAspectRatio(match[1]);
+      }
+      if (inputs.megapixels !== undefined && !isNaN(Number(inputs.megapixels))) {
+        setMegapixels(Number(inputs.megapixels));
+      }
+    }
+  }, [miniMaxWorkflow]);
 
   // Persist harmless preferences
   useEffect(() => {
@@ -127,9 +156,10 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
 
   // Dialogue line handlers
   const handleAddDialogueLine = () => {
-    const nextStart = structuredPrompt.dialogueLines.length > 0
-      ? structuredPrompt.dialogueLines[structuredPrompt.dialogueLines.length - 1].endTime
-      : '00:00';
+    const nextStart =
+      structuredPrompt.dialogueLines.length > 0
+        ? structuredPrompt.dialogueLines[structuredPrompt.dialogueLines.length - 1].endTime
+        : '00:00';
     const nextEnd = '00:0' + (parseInt(nextStart.split(':')[1] || '0') + 3);
 
     const newLine: TimedDialogueLine = {
@@ -162,6 +192,41 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
     }));
   };
 
+  // Workflow import handler
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setImportFileError(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      setImportInputText(content);
+    };
+    reader.onerror = () => {
+      setImportFileError('Failed to read file.');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleSaveImportedWorkflow = () => {
+    if (!importInputText.trim()) {
+      setImportFileError('Please paste or upload JSON content.');
+      return;
+    }
+
+    const validation = importMiniMaxWorkflow(importInputText.trim());
+    if (validation.isValid) {
+      setShowImportModal(false);
+      setImportInputText('');
+      setImportFileError(null);
+      setSuccessMsg(`MiniMax H3 API workflow imported successfully (${validation.summary?.totalNodes} nodes verified).`);
+      setTimeout(() => setSuccessMsg(null), 5000);
+    } else {
+      setImportFileError(validation.errors.join('\n'));
+    }
+  };
+
   // Generate Video
   const handleGenerateVideo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -169,6 +234,19 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
     if (!isOnline) {
       setErrorMsg('Cannot generate: ComfyUI is offline. Please connect your local instance in Settings.');
       return;
+    }
+
+    if (workflowType === 'minimax-h3') {
+      if (!miniMaxWorkflow) {
+        setErrorMsg('MiniMax H3 API workflow JSON is missing. Please import your exported ComfyUI workflow JSON before generating.');
+        setShowImportModal(true);
+        return;
+      }
+
+      if (!miniMaxWorkflowValidation?.isValid) {
+        setErrorMsg(`Workflow validation failed:\n${miniMaxWorkflowValidation?.errors.join('\n')}`);
+        return;
+      }
     }
 
     const promptText = editorMode === 'structured' ? formatMiniMaxPrompt(structuredPrompt) : rawPrompt;
@@ -192,10 +270,10 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
         seed: randomizeSeed ? Math.floor(Math.random() * 1000000000) : seed,
         randomizeSeed,
         durationSeconds,
-        resolution,
+        resolution: aspectRatio,
+        megapixels,
         fps,
         customWorkflowJson: workflowType === 'custom-video' ? customWorkflowJson : undefined,
-        nodeMapping,
       };
 
       const promptId = await submitVideoGeneration(params);
@@ -210,8 +288,7 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
     }
   };
 
-  // Filter recent videos in gallery to show outputs
-  const recentVideoOutputs = galleryItems.filter((i) => i.type === 'video').slice(0, 2);
+  const isWorkflowReady = workflowType === 'minimax-h3' ? Boolean(miniMaxWorkflow && miniMaxWorkflowValidation?.isValid) : true;
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-16">
@@ -233,7 +310,7 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
               </span>
             </div>
             <p className="text-xs text-zinc-400 mt-1">
-              High-fidelity multimodal video generation with Picture 1 reference, dialogue lip-sync, and node mapping.
+              Real exported ComfyUI MiniMax H3 workflow with Picture 1 reference, dialogue lip-sync, and preserved node graph.
             </p>
           </div>
 
@@ -243,23 +320,118 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
               onChange={(e) => setWorkflowType(e.target.value as any)}
               className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs sm:text-sm rounded-xl px-3 py-2 font-medium focus:ring-2 focus:ring-indigo-500 outline-none"
             >
-              <option value="minimax-h3">MiniMax H3 (Native Workflow)</option>
+              <option value="minimax-h3">MiniMax H3 (Exported API Workflow)</option>
               <option value="custom-video">Custom Video Workflow JSON</option>
             </select>
-
-            <button
-              type="button"
-              onClick={() => setShowNodeMappingModal(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 text-xs font-medium transition-colors"
-              title="Configure Node Mapping for ComfyUI"
-            >
-              <Settings2 className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="hidden sm:inline">Node Map</span>
-            </button>
           </div>
         </div>
 
-        {/* Custom Workflow JSON Editor (if custom selected) */}
+        {/* Real MiniMax H3 Workflow Status Card */}
+        {workflowType === 'minimax-h3' && (
+          <div className={`p-4 rounded-2xl border transition-all ${
+            isWorkflowReady
+              ? 'bg-zinc-900/80 border-emerald-500/30 shadow-sm'
+              : 'bg-gradient-to-r from-rose-950/30 via-zinc-900 to-zinc-900 border-rose-500/40'
+          }`}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  {isWorkflowReady ? (
+                    <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  )}
+                  <h3 className="text-xs sm:text-sm font-bold text-white">
+                    {isWorkflowReady
+                      ? `MiniMax H3 API Workflow Loaded (${miniMaxWorkflowValidation?.summary?.totalNodes} Nodes)`
+                      : 'MiniMax H3 API Workflow Required'}
+                  </h3>
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
+                    isWorkflowReady
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                  }`}>
+                    {isWorkflowReady ? 'Validated & Ready' : 'Missing Workflow'}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400">
+                  {isWorkflowReady
+                    ? 'Actual node mapping active: Prompt (138.value), Image (137.image), Seed (142.seed), Duration (132.value), Resolution (115.aspect_ratio/megapixels), FPS (149/146), Output (145.pingpong).'
+                    : 'Please import your real exported MiniMax H3 API workflow JSON from ComfyUI to enable video generation. No fake placeholder workflow is used.'}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                {isWorkflowReady && (
+                  <button
+                    type="button"
+                    onClick={() => setShowInspectModal(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors"
+                  >
+                    <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                    Inspect Nodes
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportInputText(miniMaxWorkflowRaw || '');
+                    setImportFileError(null);
+                    setShowImportModal(true);
+                  }}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    isWorkflowReady
+                      ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30'
+                  }`}
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {isWorkflowReady ? 'Replace Workflow' : 'Import Workflow JSON'}
+                </button>
+              </div>
+            </div>
+
+            {/* Checklist of actual mapped nodes */}
+            {isWorkflowReady && (
+              <div className="mt-3 pt-3 border-t border-zinc-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono text-zinc-400">
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Prompt: Node 138 (value)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Ref Image: Node 137 (image)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Seed: Node 142 (seed)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Duration: Node 132 (value)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Res: Node 115 (aspect/mega)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>FPS: Node 149 / 146</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-zinc-300">
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Output: Node 145 (pingpong)</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Base Graph Preserved</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Custom Workflow JSON Editor (if custom-video selected) */}
         {workflowType === 'custom-video' && (
           <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-2">
             <div className="flex items-center justify-between">
@@ -267,13 +439,6 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
                 <FileCode className="w-3.5 h-3.5 text-indigo-400" />
                 Custom Video Workflow JSON
               </label>
-              <button
-                type="button"
-                onClick={() => setShowNodeMappingModal(true)}
-                className="text-xs text-indigo-400 hover:underline"
-              >
-                Configure Node IDs →
-              </button>
             </div>
             <textarea
               rows={6}
@@ -285,10 +450,10 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
           </div>
         )}
 
-        {/* Reference Image (Picture 1 Context) */}
+        {/* Reference Image (Picture 1 -> Node 137 input 'image') */}
         <div className="bg-zinc-900/60 p-4 rounded-2xl border border-zinc-800">
           <ImageUpload
-            label="Picture 1: Reference Image Input"
+            label="Picture 1: Reference Image Input (Node 137 input 'image')"
             description="Upload the initial character or visual conditioning image for MiniMax H3"
             imageFile={referenceFile}
             imageBase64={referenceBase64}
@@ -310,7 +475,7 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-3">
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                Multimodal Prompt Editor
+                Multimodal Prompt Editor (Node 138 input 'value')
               </span>
               <div className="flex items-center rounded-lg bg-zinc-800 p-0.5 border border-zinc-700/60">
                 <button
@@ -478,7 +643,7 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
                 </div>
 
                 <div className="space-y-2">
-                  {structuredPrompt.dialogueLines.map((line, index) => (
+                  {structuredPrompt.dialogueLines.map((line) => (
                     <div
                       key={line.id}
                       className="p-2.5 rounded-xl bg-black/40 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center gap-2"
@@ -574,22 +739,22 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
           )}
         </div>
 
-        {/* Video Output Controls: Duration, Resolution, FPS, Seed */}
+        {/* Video Output Controls: Duration (Node 132), Resolution & Megapixels (Node 115), FPS (Nodes 149/146), Seed (Node 142) */}
         <div className="p-4 rounded-2xl bg-zinc-900/60 border border-zinc-800 space-y-4">
           <div className="flex items-center gap-2 border-b border-zinc-800/80 pb-2">
             <Film className="w-4 h-4 text-indigo-400" />
             <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-              Video Execution Settings
+              Workflow Parameters (Nodes 132, 115, 149/146, 142)
             </h3>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {/* Target Duration */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Target Duration (Node 132 input 'value') */}
             <div className="space-y-1.5">
               <label className="text-xs text-zinc-400 flex items-center justify-between">
-                <span>Target Duration</span>
+                <span>Duration (Node 132)</span>
                 <span className="font-mono text-indigo-400 font-bold">
-                  {durationSeconds}s (~{durationSeconds * fps} frames)
+                  {durationSeconds}s
                 </span>
               </label>
               <div className="grid grid-cols-4 gap-1.5">
@@ -610,25 +775,53 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
               </div>
             </div>
 
-            {/* Resolution */}
+            {/* Resolution: Aspect Ratio (Node 115 input 'aspect_ratio') */}
             <div className="space-y-1.5">
-              <label className="text-xs text-zinc-400">Resolution & Aspect</label>
+              <label className="text-xs text-zinc-400 flex items-center justify-between">
+                <span>Aspect Ratio (Node 115)</span>
+                <span className="font-mono text-indigo-400 text-[11px] font-bold">{aspectRatio}</span>
+              </label>
               <select
-                value={resolution}
-                onChange={(e) => setResolution(e.target.value)}
+                value={aspectRatio}
+                onChange={(e) => setAspectRatio(e.target.value)}
                 className="w-full bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded-lg px-2.5 py-2 font-mono outline-none"
               >
-                <option value="720x1280 (9:16 Vertical)">720x1280 (9:16 TikTok/Shorts)</option>
-                <option value="1280x720 (16:9 Widescreen)">1280x720 (16:9 Cinematic)</option>
-                <option value="1024x1024 (1:1 Square)">1024x1024 (1:1 Square)</option>
-                <option value="1080x1920 (9:16 Full HD)">1080x1920 (9:16 FHD)</option>
+                <option value="9:16">9:16 (Vertical / Mobile Shorts)</option>
+                <option value="16:9">16:9 (Widescreen / Cinematic)</option>
+                <option value="1:1">1:1 (Square)</option>
+                <option value="4:3">4:3 (Classic Landscape)</option>
+                <option value="3:4">3:4 (Portrait Standard)</option>
               </select>
             </div>
 
-            {/* Frame Rate */}
+            {/* Resolution: Megapixels (Node 115 input 'megapixels') */}
             <div className="space-y-1.5">
               <label className="text-xs text-zinc-400 flex items-center justify-between">
-                <span>Frame Rate</span>
+                <span>Megapixels (Node 115)</span>
+                <span className="font-mono text-indigo-400 text-[11px] font-bold">{megapixels} MP</span>
+              </label>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[0.5, 0.72, 1.0, 1.5].map((mp) => (
+                  <button
+                    key={mp}
+                    type="button"
+                    onClick={() => setMegapixels(mp)}
+                    className={`py-1.5 text-xs font-mono rounded-lg border transition-all ${
+                      megapixels === mp
+                        ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300 font-bold'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {mp}MP
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Frame Rate (Nodes 149 / 146) */}
+            <div className="space-y-1.5">
+              <label className="text-xs text-zinc-400 flex items-center justify-between">
+                <span>FPS (Nodes 149/146)</span>
                 <span className="font-mono text-zinc-300">{fps} FPS</span>
               </label>
               <div className="grid grid-cols-3 gap-1.5">
@@ -650,11 +843,11 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
             </div>
           </div>
 
-          {/* Seed Input + Randomize */}
+          {/* Seed Input (Node 142 input 'seed') + Randomize */}
           <div className="pt-2 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="space-y-1">
-                <label className="text-[11px] text-zinc-400">Seed Value</label>
+                <label className="text-[11px] text-zinc-400">Seed Value (Node 142 input 'seed')</label>
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -686,17 +879,17 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
               </label>
             </div>
 
-            <div className="text-right text-[11px] text-zinc-400">
-              Target Nodes: Prompt #{nodeMapping.promptNodeId}, Image #{nodeMapping.imageNodeId}
+            <div className="text-right text-[11px] text-zinc-400 font-mono">
+              Output: Node 145 (pingpong: preserved)
             </div>
           </div>
         </div>
 
         {/* Feedback Messages */}
         {errorMsg && (
-          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMsg}</span>
+          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2 whitespace-pre-line">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div>{errorMsg}</div>
           </div>
         )}
 
@@ -742,9 +935,9 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
         <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
           <button
             type="submit"
-            disabled={isSubmitting || !isOnline}
+            disabled={isSubmitting || !isOnline || !isWorkflowReady}
             className={`w-full sm:w-auto flex-1 flex items-center justify-center gap-2.5 py-4 px-6 rounded-xl font-bold text-sm text-white transition-all shadow-xl ${
-              !isOnline
+              !isOnline || !isWorkflowReady
                 ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700/60'
                 : isSubmitting
                 ? 'bg-indigo-700 cursor-wait'
@@ -761,41 +954,167 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
                 <RefreshCw className="w-5 h-5 animate-spin" />
                 Generating Video (Node #{executingNodeId || '...'})
               </>
+            ) : !isWorkflowReady ? (
+              <>
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                Import MiniMax H3 Workflow JSON to Generate
+              </>
             ) : (
               <>
-                <Sparkles className="w-5 h-5" />
+                <Sparkles className="w-4 h-4" />
                 Generate MiniMax H3 Video
               </>
             )}
           </button>
 
-          {!isOnline && (
+          {!isOnline ? (
             <p className="text-xs text-rose-400 sm:text-right">
               Local ComfyUI is offline. Connect in Settings to enable generation.
             </p>
-          )}
+          ) : !isWorkflowReady ? (
+            <p className="text-xs text-amber-400 sm:text-right">
+              API workflow JSON missing. Click 'Import Workflow' above.
+            </p>
+          ) : null}
         </div>
       </form>
 
-      {/* MiniMax Node Mapping Modal */}
-      {showNodeMappingModal && (
+      {/* IMPORT WORKFLOW MODAL */}
+      {showImportModal && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setShowNodeMappingModal(false)}
+          onClick={() => setShowImportModal(false)}
         >
           <div
-            className="bg-zinc-900 border border-zinc-700 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl"
+            className="bg-zinc-900 border border-zinc-700 rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2">
-                <Settings2 className="w-5 h-5 text-indigo-400" />
+                <FileCode className="w-5 h-5 text-indigo-400" />
                 <h3 className="font-bold text-white text-base">
-                  MiniMax H3 Node Mapping
+                  Import MiniMax H3 API Workflow JSON
                 </h3>
               </div>
               <button
-                onClick={() => setShowNodeMappingModal(false)}
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-zinc-300 space-y-2">
+              <p>
+                Import your real exported MiniMax H3 workflow JSON. The app will strictly use your real workflow and map inputs (138, 137, 142, 132, 115, 149/146, 145) without mutating the base graph.
+              </p>
+              <div className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-500/30 text-indigo-300 text-[11px] space-y-1">
+                <span className="font-semibold">How to export from ComfyUI:</span>
+                <p>
+                  1. In ComfyUI, click the gear icon (Settings) and turn on <code className="bg-black/40 px-1 py-0.5 rounded text-indigo-200">Enable Dev mode Options</code>.
+                </p>
+                <p>
+                  2. Load your MiniMax H3 workflow and click <code className="bg-black/40 px-1 py-0.5 rounded text-indigo-200">Save (API Format)</code>.
+                </p>
+                <p>
+                  3. Upload or paste that exported JSON below.
+                </p>
+              </div>
+            </div>
+
+            {/* File Upload Button */}
+            <div className="flex items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold border border-zinc-700 transition-colors"
+              >
+                <Upload className="w-3.5 h-3.5 text-indigo-400" />
+                Choose .json file from disk
+              </button>
+              <span className="text-xs text-zinc-500">or paste the JSON text directly below</span>
+            </div>
+
+            {/* Textarea for JSON */}
+            <div className="flex-1 min-h-[160px] flex flex-col">
+              <textarea
+                value={importInputText}
+                onChange={(e) => {
+                  setImportInputText(e.target.value);
+                  setImportFileError(null);
+                }}
+                placeholder="Paste ComfyUI API format workflow JSON here... e.g. { &quot;138&quot;: { &quot;class_type&quot;: ... } }"
+                className="flex-1 w-full bg-black/70 border border-zinc-800 rounded-xl p-3 text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:ring-2 focus:ring-indigo-500 outline-none leading-relaxed resize-y"
+              />
+            </div>
+
+            {importFileError && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs whitespace-pre-line max-h-32 overflow-y-auto">
+                <div className="font-semibold mb-1">Validation Errors:</div>
+                {importFileError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-3 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setImportInputText('');
+                  setImportFileError(null);
+                }}
+                className="text-xs text-zinc-400 hover:text-zinc-200"
+              >
+                Clear Input
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(false)}
+                  className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveImportedWorkflow}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all"
+                >
+                  Save & Validate Workflow
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* INSPECT WORKFLOW MODAL */}
+      {showInspectModal && miniMaxWorkflow && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowInspectModal(false)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-700 rounded-2xl max-w-3xl w-full p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Layers className="w-5 h-5 text-indigo-400" />
+                <h3 className="font-bold text-white text-base">
+                  Imported MiniMax H3 Workflow Inspector
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowInspectModal(false)}
                 className="text-zinc-400 hover:text-white p-1"
               >
                 ✕
@@ -803,109 +1122,76 @@ export const GenerateVideoPage: React.FC<GenerateVideoPageProps> = ({ setActiveT
             </div>
 
             <p className="text-xs text-zinc-400">
-              Map which nodes in your ComfyUI workflow graph receive the prompt text, reference image, seed, and output stream:
+              Inspecting real nodes from your persisted ComfyUI API workflow graph ({Object.keys(miniMaxWorkflow).length} nodes total).
             </p>
 
-            <div className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Prompt Node ID</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.promptNodeId}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, promptNodeId: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="2"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Prompt Input Key</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.promptInputKey}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, promptInputKey: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="text"
-                  />
-                </div>
-              </div>
+            {/* Mapped Nodes Detailed List */}
+            <div className="space-y-3 overflow-y-auto max-h-[55vh] pr-1">
+              {[
+                { id: '138', role: 'Prompt Node', targetKey: 'value' },
+                { id: '137', role: 'Reference Image Node', targetKey: 'image' },
+                { id: '142', role: 'Seed Node', targetKey: 'seed' },
+                { id: '132', role: 'Duration Node', targetKey: 'value' },
+                { id: '115', role: 'Resolution Node', targetKey: 'aspect_ratio, megapixels' },
+                { id: '149', role: 'FPS Node (149)', targetKey: 'fps / value' },
+                { id: '146', role: 'FPS Node (146)', targetKey: 'fps / value' },
+                { id: '145', role: 'Video Output Node', targetKey: 'pingpong (preserved)' },
+              ].map((mapItem) => {
+                const node = miniMaxWorkflow[mapItem.id];
+                return (
+                  <div
+                    key={mapItem.id}
+                    className={`p-3 rounded-xl border text-xs font-mono space-y-1.5 ${
+                      node
+                        ? 'bg-zinc-950/80 border-zinc-800 text-zinc-300'
+                        : 'bg-rose-950/30 border-rose-500/30 text-rose-400'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between font-sans">
+                      <div className="flex items-center gap-2 font-bold">
+                        <span className="text-indigo-400">Node #{mapItem.id}</span>
+                        <span className="text-zinc-200">{mapItem.role}</span>
+                      </div>
+                      <span className="text-[11px] text-zinc-500">Target input: {mapItem.targetKey}</span>
+                    </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Image Input Node ID</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.imageNodeId}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, imageNodeId: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="1"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Image Input Key</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.imageInputKey}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, imageInputKey: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="image"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Seed Node ID</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.seedNodeId || ''}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, seedNodeId: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="3"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-zinc-300 font-medium">Resolution / Latent Node</label>
-                  <input
-                    type="text"
-                    value={nodeMapping.durationNodeId || ''}
-                    onChange={(e) =>
-                      setNodeMapping({ ...nodeMapping, durationNodeId: e.target.value })
-                    }
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-                    placeholder="6"
-                  />
-                </div>
-              </div>
+                    {node ? (
+                      <div>
+                        <div className="text-zinc-400 text-[11px]">
+                          Class: <span className="text-amber-300">{node.class_type}</span>
+                          {node._meta?.title && <span className="text-zinc-500 ml-2">({node._meta.title})</span>}
+                        </div>
+                        <div className="bg-black/60 p-2 rounded-lg mt-1 text-[10px] text-zinc-300 overflow-x-auto">
+                          {JSON.stringify(node.inputs, null, 2)}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-rose-400 text-[11px]">Node not found in current workflow!</div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             <div className="flex items-center justify-between pt-3 border-t border-zinc-800">
               <button
                 type="button"
-                onClick={() => setNodeMapping(DEFAULT_MINIMAX_NODE_MAPPING)}
-                className="text-xs text-zinc-400 hover:text-zinc-200"
+                onClick={() => {
+                  if (confirm('Clear the saved MiniMax H3 workflow?')) {
+                    clearMiniMaxWorkflow();
+                    setShowInspectModal(false);
+                  }
+                }}
+                className="text-xs text-rose-400 hover:text-rose-300 font-medium"
               >
-                Reset to Default
+                Clear / Remove Workflow
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  updateMiniMaxMapping(nodeMapping);
-                  setShowNodeMappingModal(false);
-                }}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition-colors"
+                onClick={() => setShowInspectModal(false)}
+                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold"
               >
-                Save Mapping
+                Close Inspector
               </button>
             </div>
           </div>

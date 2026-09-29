@@ -36,6 +36,10 @@ export const SettingsPage: React.FC = () => {
     miniMaxMapping,
     updateMiniMaxMapping,
     clientId,
+    miniMaxWorkflow,
+    miniMaxWorkflowValidation,
+    clearMiniMaxWorkflow,
+    importMiniMaxWorkflow,
   } = useComfy();
 
   const [urlInput, setUrlInput] = useState(backendUrl);
@@ -46,6 +50,12 @@ export const SettingsPage: React.FC = () => {
   } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
+
+  // Workflow import modal in settings
+  const [showSettingsImport, setShowSettingsImport] = useState(false);
+  const [settingsImportText, setSettingsImportText] = useState('');
+  const [settingsImportError, setSettingsImportError] = useState<string | null>(null);
+  const [settingsSuccessMsg, setSettingsSuccessMsg] = useState<string | null>(null);
 
   // Mapping state
   const [mapping, setMapping] = useState<MiniMaxNodeMapping>(miniMaxMapping);
@@ -251,94 +261,161 @@ export const SettingsPage: React.FC = () => {
         </div>
       )}
 
-      {/* MiniMax H3 Workflow Node Mapping Config */}
-      <div className="bg-zinc-900/80 p-5 rounded-2xl border border-zinc-800 space-y-4">
+      {/* Real MiniMax H3 API Workflow Configuration */}
+      <div className="bg-zinc-900/80 p-5 rounded-2xl border border-zinc-800 space-y-4 shadow-lg">
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-indigo-400" />
             <h2 className="text-sm font-bold text-white">
-              MiniMax H3 Workflow Node Mapping
+              MiniMax H3 API Workflow JSON
             </h2>
           </div>
-          <button
-            type="button"
-            onClick={() => setMapping(DEFAULT_MINIMAX_NODE_MAPPING)}
-            className="text-xs text-zinc-400 hover:text-zinc-200"
+          <span
+            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-full ${
+              miniMaxWorkflow && miniMaxWorkflowValidation?.isValid
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+            }`}
           >
-            Reset to Standard
-          </button>
+            {miniMaxWorkflow && miniMaxWorkflowValidation?.isValid
+              ? `${miniMaxWorkflowValidation?.summary?.totalNodes} Nodes Validated`
+              : 'Not Loaded'}
+          </span>
         </div>
 
         <p className="text-xs text-zinc-400">
-          When submitting a MiniMax H3 generation, Comfy Remote injects prompt text, reference image, and seed into these ComfyUI node IDs:
+          Comfy Remote requires your real exported ComfyUI MiniMax H3 workflow in API format.
+          The generator deep-clones this workflow, preserves all existing node links and fields, and updates strictly:
         </p>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-          <div className="space-y-1">
-            <label className="text-zinc-300 font-medium">Prompt Node ID</label>
-            <input
-              type="text"
-              value={mapping.promptNodeId}
-              onChange={(e) => setMapping({ ...mapping, promptNodeId: e.target.value })}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-              placeholder="2"
-            />
-            <span className="text-[10px] text-zinc-500">Node with text input (CLIPTextEncode)</span>
-          </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono text-zinc-300 bg-black/40 p-3 rounded-xl border border-zinc-800">
+          <div>• Node 138: <span className="text-indigo-400">value</span> (prompt)</div>
+          <div>• Node 137: <span className="text-indigo-400">image</span> (ref picture)</div>
+          <div>• Node 142: <span className="text-indigo-400">seed</span> (seed)</div>
+          <div>• Node 132: <span className="text-indigo-400">value</span> (duration)</div>
+          <div>• Node 115: <span className="text-indigo-400">aspect / mega</span></div>
+          <div>• Node 149 / 146: <span className="text-indigo-400">FPS</span></div>
+          <div>• Node 145: <span className="text-indigo-400">pingpong (saved)</span></div>
+          <div className="text-emerald-400 font-sans font-semibold">✓ Zero fabrication</div>
+        </div>
 
-          <div className="space-y-1">
-            <label className="text-zinc-300 font-medium">Image Input Node ID</label>
-            <input
-              type="text"
-              value={mapping.imageNodeId}
-              onChange={(e) => setMapping({ ...mapping, imageNodeId: e.target.value })}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-              placeholder="1"
-            />
-            <span className="text-[10px] text-zinc-500">Node for Picture 1 (LoadImage)</span>
-          </div>
+        {/* Action Buttons */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+          {miniMaxWorkflow ? (
+            <button
+              type="button"
+              onClick={() => {
+                clearMiniMaxWorkflow();
+                setSettingsSuccessMsg('MiniMax H3 workflow cleared.');
+                setTimeout(() => setSettingsSuccessMsg(null), 3000);
+              }}
+              className="text-xs text-rose-400 hover:text-rose-300 font-medium self-start sm:self-center"
+            >
+              Clear Stored Workflow
+            </button>
+          ) : (
+            <div />
+          )}
 
-          <div className="space-y-1">
-            <label className="text-zinc-300 font-medium">Seed Node ID</label>
-            <input
-              type="text"
-              value={mapping.seedNodeId || ''}
-              onChange={(e) => setMapping({ ...mapping, seedNodeId: e.target.value })}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-              placeholder="3"
-            />
-            <span className="text-[10px] text-zinc-500">Sampler node seed input</span>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-zinc-300 font-medium">Duration & Resolution Node ID</label>
-            <input
-              type="text"
-              value={mapping.durationNodeId || ''}
-              onChange={(e) => setMapping({ ...mapping, durationNodeId: e.target.value })}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 font-mono text-zinc-200"
-              placeholder="6"
-            />
-            <span className="text-[10px] text-zinc-500">EmptyLatentImage / length</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsImportText('');
+                setSettingsImportError(null);
+                setShowSettingsImport(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors shadow-md shadow-indigo-600/30"
+            >
+              {miniMaxWorkflow ? 'Replace Workflow JSON' : 'Import Workflow JSON'}
+            </button>
           </div>
         </div>
 
-        {savedMappingMsg && (
-          <div className="text-xs text-emerald-400 font-medium flex items-center gap-1.5">
-            <CheckCircle2 className="w-4 h-4" />
-            Node mapping saved successfully!
+        {settingsSuccessMsg && (
+          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
+            {settingsSuccessMsg}
           </div>
         )}
 
-        <div className="flex justify-end pt-2">
-          <button
-            type="button"
-            onClick={handleSaveMapping}
-            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors"
+        {/* Modal for importing in settings */}
+        {showSettingsImport && (
+          <div
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setShowSettingsImport(false)}
           >
-            Save Node Mapping
-          </button>
-        </div>
+            <div
+              className="bg-zinc-900 border border-zinc-700 rounded-2xl max-w-xl w-full p-5 space-y-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                <h3 className="font-bold text-white text-sm">
+                  Import MiniMax H3 API Workflow JSON
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsImport(false)}
+                  className="text-zinc-400 hover:text-white p-1 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="text-xs text-zinc-400">
+                Paste your exported ComfyUI API format workflow JSON below. Required nodes (138, 137, 142, 132, 115, 149/146, 145) will be validated.
+              </p>
+
+              <textarea
+                rows={8}
+                value={settingsImportText}
+                onChange={(e) => {
+                  setSettingsImportText(e.target.value);
+                  setSettingsImportError(null);
+                }}
+                placeholder="Paste JSON here..."
+                className="w-full bg-black/70 border border-zinc-800 rounded-xl p-3 text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:ring-2 focus:ring-indigo-500 outline-none leading-relaxed"
+              />
+
+              {settingsImportError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs whitespace-pre-line max-h-32 overflow-y-auto">
+                  {settingsImportError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsImport(false)}
+                  className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!settingsImportText.trim()) {
+                      setSettingsImportError('Please enter workflow JSON.');
+                      return;
+                    }
+                    const res = importMiniMaxWorkflow(settingsImportText.trim());
+                    if (res.isValid) {
+                      setShowSettingsImport(false);
+                      setSettingsImportText('');
+                      setSettingsImportError(null);
+                      setSettingsSuccessMsg(`Workflow imported successfully (${res.summary?.totalNodes} nodes verified).`);
+                      setTimeout(() => setSettingsSuccessMsg(null), 5000);
+                    } else {
+                      setSettingsImportError(res.errors.join('\n'));
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30"
+                >
+                  Save & Validate
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Windows Local ComfyUI Setup Guide */}

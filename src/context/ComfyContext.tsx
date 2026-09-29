@@ -19,6 +19,11 @@ import {
 import { ComfyApiService, ConnectionTestResult } from '../services/api';
 import { BUILTIN_WORKFLOWS, DEFAULT_MINIMAX_NODE_MAPPING } from '../utils/workflowTemplates';
 import { formatMiniMaxPrompt } from '../utils/promptUtils';
+import {
+  validateMiniMaxH3Workflow,
+  prepareMiniMaxH3ExecutionPayload,
+  MiniMaxValidationResult,
+} from '../utils/minimaxWorkflow';
 
 interface ComfyContextType {
   // Connection state
@@ -41,6 +46,13 @@ interface ComfyContextType {
   // Outputs / Gallery
   galleryItems: OutputMedia[];
   isLoadingGallery: boolean;
+
+  // Real MiniMax H3 Workflow
+  miniMaxWorkflow: Record<string, any> | null;
+  miniMaxWorkflowRaw: string;
+  miniMaxWorkflowValidation: MiniMaxValidationResult | null;
+  importMiniMaxWorkflow: (jsonString: string) => MiniMaxValidationResult;
+  clearMiniMaxWorkflow: () => void;
 
   // Settings & Actions
   setBackendUrl: (url: string) => void;
@@ -65,6 +77,7 @@ const STORAGE_KEY_BACKEND = 'comfy_remote_backend_url';
 const STORAGE_KEY_AUTH = 'comfy_remote_auth_token';
 const STORAGE_KEY_CLIENT_ID = 'comfy_remote_client_id';
 const STORAGE_KEY_MINIMAX_MAP = 'comfy_remote_minimax_mapping';
+const STORAGE_KEY_MINIMAX_WORKFLOW = 'comfy_remote_minimax_h3_real_workflow';
 
 function generateClientId(): string {
   return 'comfy_remote_' + Math.random().toString(36).substring(2, 10);
@@ -96,6 +109,62 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return DEFAULT_MINIMAX_NODE_MAPPING;
     }
   });
+
+  // Real imported MiniMax H3 API workflow JSON
+  const [miniMaxWorkflow, setMiniMaxWorkflow] = useState<Record<string, any> | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_MINIMAX_WORKFLOW);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [miniMaxWorkflowRaw, setMiniMaxWorkflowRaw] = useState<string>(() => {
+    return localStorage.getItem(STORAGE_KEY_MINIMAX_WORKFLOW) || '';
+  });
+
+  const [miniMaxWorkflowValidation, setMiniMaxWorkflowValidation] = useState<MiniMaxValidationResult | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_MINIMAX_WORKFLOW);
+      if (!saved) return null;
+      const parsed = JSON.parse(saved);
+      return validateMiniMaxH3Workflow(parsed);
+    } catch {
+      return null;
+    }
+  });
+
+  const importMiniMaxWorkflow = (jsonString: string): MiniMaxValidationResult => {
+    try {
+      const parsed = JSON.parse(jsonString);
+      const validation = validateMiniMaxH3Workflow(parsed);
+      if (validation.isValid) {
+        setMiniMaxWorkflow(parsed);
+        setMiniMaxWorkflowRaw(jsonString);
+        setMiniMaxWorkflowValidation(validation);
+        localStorage.setItem(STORAGE_KEY_MINIMAX_WORKFLOW, jsonString);
+      } else {
+        setMiniMaxWorkflowValidation(validation);
+      }
+      return validation;
+    } catch (err: any) {
+      const validation: MiniMaxValidationResult = {
+        isValid: false,
+        errors: [`Invalid JSON syntax: ${err.message}`],
+        warnings: [],
+      };
+      setMiniMaxWorkflowValidation(validation);
+      return validation;
+    }
+  };
+
+  const clearMiniMaxWorkflow = () => {
+    setMiniMaxWorkflow(null);
+    setMiniMaxWorkflowRaw('');
+    setMiniMaxWorkflowValidation(null);
+    localStorage.removeItem(STORAGE_KEY_MINIMAX_WORKFLOW);
+  };
 
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -504,7 +573,7 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setIsGenerating(true);
     let uploadedImageName: string | null = null;
 
-    // 1. Upload reference image if provided (Picture 1)
+    // 1. Upload reference image if provided (Picture 1 -> Node 137 input 'image')
     if (params.referenceImageFile) {
       const uploadRes = await ComfyApiService.uploadImage(
         backendUrl,
@@ -514,6 +583,9 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
       if (uploadRes) {
         uploadedImageName = uploadRes.name;
+      } else {
+        setIsGenerating(false);
+        throw new Error('Failed to upload reference image to ComfyUI /upload/image.');
       }
     }
 
@@ -526,7 +598,11 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // 3. Prepare workflow JSON
     let workflowJson: Record<string, any>;
 
-    if (params.workflow === 'custom-video' && params.customWorkflowJson) {
+    if (params.workflow === 'custom-video') {
+      if (!params.customWorkflowJson) {
+        setIsGenerating(false);
+        throw new Error('Custom video workflow JSON is empty.');
+      }
       try {
         workflowJson = JSON.parse(params.customWorkflowJson);
       } catch (err: any) {
@@ -534,68 +610,66 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         throw new Error(`Invalid custom video workflow JSON: ${err.message}`);
       }
     } else {
-      // Default MiniMax H3 workflow
-      workflowJson = JSON.parse(JSON.stringify(BUILTIN_WORKFLOWS.minimaxH3.json));
-    }
-
-    // 4. Apply node mappings: prompt, reference image, seed, duration, resolution, fps
-    const mapping = params.nodeMapping || miniMaxMapping;
-
-    // Map prompt node
-    if (mapping.promptNodeId && workflowJson[mapping.promptNodeId]) {
-      const node = workflowJson[mapping.promptNodeId];
-      if (!node.inputs) node.inputs = {};
-      node.inputs[mapping.promptInputKey || 'text'] = finalPromptText;
-    }
-
-    // Map reference image node
-    if (uploadedImageName && mapping.imageNodeId && workflowJson[mapping.imageNodeId]) {
-      const node = workflowJson[mapping.imageNodeId];
-      if (!node.inputs) node.inputs = {};
-      node.inputs[mapping.imageInputKey || 'image'] = uploadedImageName;
-    }
-
-    // Map seed
-    const effectiveSeed = params.randomizeSeed
-      ? Math.floor(Math.random() * 100000000)
-      : params.seed;
-
-    if (mapping.seedNodeId && workflowJson[mapping.seedNodeId]) {
-      const node = workflowJson[mapping.seedNodeId];
-      if (!node.inputs) node.inputs = {};
-      node.inputs[mapping.seedInputKey || 'seed'] = effectiveSeed;
-    }
-
-    // Map duration / frames in latent node if present
-    if (mapping.durationNodeId && workflowJson[mapping.durationNodeId]) {
-      const node = workflowJson[mapping.durationNodeId];
-      if (node.inputs) {
-        // Parse resolution (e.g. "720x1280")
-        const [w, h] = params.resolution.split(' ')[0].split('x').map(Number);
-        if (w && h) {
-          node.inputs.width = w;
-          node.inputs.height = h;
-        }
-        // Calculate frame count: duration * fps
-        const totalFrames = Math.max(25, Math.round(params.durationSeconds * params.fps));
-        if (node.inputs.batch_size !== undefined) {
-          node.inputs.batch_size = totalFrames;
-        }
-        if (node.inputs.length !== undefined) {
-          node.inputs.length = totalFrames;
-        }
+      // Real imported MiniMax H3 workflow JSON
+      if (!miniMaxWorkflow) {
+        setIsGenerating(false);
+        throw new Error(
+          'MiniMax H3 API workflow JSON is missing. Please import your exported ComfyUI workflow JSON before generating.'
+        );
       }
-    }
 
-    // Map FPS in video output node
-    if (mapping.fpsNodeId && workflowJson[mapping.fpsNodeId]) {
-      const node = workflowJson[mapping.fpsNodeId];
-      if (node.inputs && node.inputs.frame_rate !== undefined) {
-        node.inputs.frame_rate = params.fps;
+      // Validate base workflow before doing anything
+      const baseCheck = validateMiniMaxH3Workflow(miniMaxWorkflow);
+      if (!baseCheck.isValid) {
+        setIsGenerating(false);
+        throw new Error(
+          `MiniMax H3 workflow validation failed:\n• ${baseCheck.errors.join('\n• ')}`
+        );
       }
+
+      const effectiveSeed = params.randomizeSeed
+        ? Math.floor(Math.random() * 1000000000)
+        : params.seed;
+
+      // Deep clone and map inputs according to the user's exported workflow:
+      // Node 138: prompt input 'value'
+      // Node 137: reference image input 'image'
+      // Node 142: seed input 'seed'
+      // Node 132: duration input 'value'
+      // Node 115: inputs 'aspect_ratio' and 'megapixels'
+      // Nodes 149 and 146: FPS inputs
+      // Node 145: video output, preserving 'pingpong' input
+      const prepared = prepareMiniMaxH3ExecutionPayload({
+        baseWorkflow: miniMaxWorkflow,
+        promptText: finalPromptText,
+        uploadedImageName,
+        seed: effectiveSeed,
+        durationSeconds: params.durationSeconds,
+        aspectRatio: params.resolution,
+        megapixels: params.megapixels,
+        fps: params.fps,
+      });
+
+      if (prepared.errors.length > 0) {
+        setIsGenerating(false);
+        throw new Error(
+          `Failed to configure workflow inputs:\n• ${prepared.errors.join('\n• ')}`
+        );
+      }
+
+      // Final validation of the prepared payload before POSTing to /prompt
+      const finalValidation = validateMiniMaxH3Workflow(prepared.payload);
+      if (!finalValidation.isValid) {
+        setIsGenerating(false);
+        throw new Error(
+          `Pre-execution workflow validation failed:\n• ${finalValidation.errors.join('\n• ')}`
+        );
+      }
+
+      workflowJson = prepared.payload;
     }
 
-    // 5. Submit to /prompt
+    // 4. Submit to /prompt
     try {
       const response = await ComfyApiService.queuePrompt(
         backendUrl,
@@ -642,6 +716,11 @@ export const ComfyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isGenerating,
         galleryItems,
         isLoadingGallery,
+        miniMaxWorkflow,
+        miniMaxWorkflowRaw,
+        miniMaxWorkflowValidation,
+        importMiniMaxWorkflow,
+        clearMiniMaxWorkflow,
         setBackendUrl,
         setAuthToken,
         updateMiniMaxMapping,
