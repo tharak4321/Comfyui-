@@ -1,0 +1,6 @@
+{
+  "name": "Comfy Remote",
+  "description": "Mobile-first responsive control panel for local ComfyUI installations with real-time WebSocket monitoring, MiniMax H3 video, Qwen & Krea workflows, queue control, and output gallery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
